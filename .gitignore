@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+__pycache__/
+*.class
+target/
+.env
+*.jar
+*.log
+.idea/
+*.iml
