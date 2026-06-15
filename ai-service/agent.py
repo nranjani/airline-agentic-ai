@@ -1,3 +1,4 @@
+
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -58,13 +59,13 @@ def extract_pnr(text: str) -> str:
 
 def detect_intent(state: AgentState) -> AgentState:
     last_message = state["messages"][-1].content.lower()
-    if any(w in last_message for w in ["book", "flight", "ticket", "search", "find"]):
+    if any(w in last_message for w in ["book", "flight", "ticket", "search", "find", "fly"]):
         intent = "BOOKING"
     elif any(w in last_message for w in ["cancel", "cancellation"]):
         intent = "CANCEL"
     elif any(w in last_message for w in ["refund", "money back", "reimburse"]):
         intent = "REFUND"
-    elif any(w in last_message for w in ["agent", "human", "person", "escalate"]):
+    elif any(w in last_message for w in ["agent", "human", "person", "escalate", "speak", "talk"]):
         intent = "ESCALATE"
     else:
         intent = "GENERAL"
@@ -72,11 +73,9 @@ def detect_intent(state: AgentState) -> AgentState:
     return {**state, "intent": intent, "pnr": pnr}
 
 def handle_booking(state: AgentState) -> AgentState:
-    system_prompt = """You are an airline booking assistant.
-    Help the customer search for and book flights.
-    Ask for: origin, destination, travel date, passengers, cabin class.
-    Present realistic flight options with flight numbers, times, and prices.
-    Be concise and professional."""
+    system_prompt = """You are a booking assistant for Prime Airlines.
+RULES: Reply in max 1-2 short sentences. Ask ONE thing only. No lists.
+Ask: origin city first. Then destination. Then date. Then passengers. Then cabin class. Then confirm with PNR."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
     return {**state, "messages": state["messages"] + [response]}
@@ -89,17 +88,19 @@ def handle_cancel(state: AgentState) -> AgentState:
         if "error" not in booking_data:
             result = cancel_booking(pnr)
             if "error" in result:
-                booking_info = f"Cancellation failed: {result['error']}"
+                booking_info = f"Cannot cancel: {result['error']}"
             else:
-                booking_info = f"Booking {pnr} cancelled. Status: {result.get('status')}"
+                booking_info = f"Booking {pnr} cancelled successfully."
         else:
-            booking_info = f"Could not find booking {pnr}."
+            booking_info = f"Booking {pnr} not found."
     else:
-        booking_info = "Please provide your PNR number to cancel."
-    system_prompt = f"""You are an airline cancellation assistant.
-    {booking_info}
-    Policy: Within 24hrs full refund. Basic Economy: travel credit only.
-    Main Cabin and above: free cancellation, full refund."""
+        booking_info = "No PNR yet."
+    system_prompt = f"""You are a cancellation assistant for Prime Airlines.
+RULES: Reply in max 1-2 short sentences. Ask ONE thing only. No lists.
+Status: {booking_info}
+If no PNR: ask only "What is your booking reference number?"
+If cancelled: say done and ask if they want a refund.
+If Basic Economy: say travel credit only applies."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
     return {**state, "messages": state["messages"] + [response]}
@@ -110,31 +111,32 @@ def handle_refund(state: AgentState) -> AgentState:
     if pnr:
         result = request_refund(pnr)
         if "error" in result:
-            refund_info = f"Refund failed: {result['error']}"
+            refund_info = f"Issue: {result['error']}"
         else:
-            refund_info = f"Refund initiated for {pnr}. Case: REF-{pnr}-2026"
+            refund_info = f"Refund initiated for {pnr}."
     else:
-        refund_info = "Please provide your PNR to process a refund."
-    system_prompt = f"""You are an airline refund assistant.
-    {refund_info}
-    Timelines: Credit card 7-10 days. Travel credit 24hrs. Miles 72hrs."""
+        refund_info = "No PNR yet."
+    system_prompt = f"""You are a refund assistant for Prime Airlines.
+RULES: Reply in max 1-2 short sentences. No lists.
+Status: {refund_info}
+If no PNR: ask only "What is your booking reference number?"
+If refund initiated: confirm and say 7-10 business days for credit card."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
     return {**state, "messages": state["messages"] + [response]}
 
 def handle_escalate(state: AgentState) -> AgentState:
-    system_prompt = """You are an airline assistant.
-    The customer needs a human agent.
-    Tell them you are connecting them now and their history will be shared.
-    Estimated wait: 2-3 minutes."""
+    system_prompt = """You are an assistant for Prime Airlines.
+RULES: Reply in exactly 2 short sentences only.
+Tell the customer you are connecting them to a live agent and wait is 2-3 minutes."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
     return {**state, "messages": state["messages"] + [response], "needs_escalation": True}
 
 def handle_general(state: AgentState) -> AgentState:
-    system_prompt = """You are a helpful airline customer service assistant.
-    Help with bookings, cancellations, refunds, baggage, and loyalty program.
-    Be concise, warm, and professional."""
+    system_prompt = """You are a helpful assistant for Prime Airlines.
+RULES: Reply in max 1-2 short sentences. No lists. Ask ONE question if needed.
+Help with bookings, cancellations, refunds, baggage, and Prime Rewards."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
     return {**state, "messages": state["messages"] + [response]}
@@ -153,7 +155,10 @@ def build_agent():
     graph.add_node("escalate", handle_escalate)
     graph.add_node("general", handle_general)
     graph.set_entry_point("detect_intent")
-    graph.add_conditional_edges("detect_intent", route_intent, {"booking": "booking", "cancel": "cancel", "refund": "refund", "escalate": "escalate", "general": "general"})
+    graph.add_conditional_edges("detect_intent", route_intent, {
+        "booking": "booking", "cancel": "cancel", "refund": "refund",
+        "escalate": "escalate", "general": "general"
+    })
     graph.add_edge("booking", END)
     graph.add_edge("cancel", END)
     graph.add_edge("refund", END)
@@ -163,28 +168,4 @@ def build_agent():
 
 if __name__ == "__main__":
     agent = build_agent()
-    print("=" * 50)
-    print("Airline Agentic AI — LangGraph Agent")
-    print("=" * 50)
-
-    print("\nTest 1: Booking request")
-    result = agent.invoke({
-        "messages": [HumanMessage(content="I want to book a flight from DFW to JFK next Friday")],
-        "intent": "", "pnr": "", "booking_data": {}, "needs_escalation": False, "session_id": "test-001"
-    })
-    print("Agent:", result["messages"][-1].content[:300])
-
-    print("\nTest 2: Cancellation request")
-    result = agent.invoke({
-        "messages": [HumanMessage(content="I need to cancel my booking 5381EB")],
-        "intent": "", "pnr": "", "booking_data": {}, "needs_escalation": False, "session_id": "test-002"
-    })
-    print("Agent:", result["messages"][-1].content[:300])
-
-    print("\nTest 3: Escalation request")
-    result = agent.invoke({
-        "messages": [HumanMessage(content="I need to speak to a human agent")],
-        "intent": "", "pnr": "", "booking_data": {}, "needs_escalation": False, "session_id": "test-003"
-    })
-    print("Agent:", result["messages"][-1].content[:300])
-    print("Escalation flag:", result["needs_escalation"])
+    print("Prime Airlines Agent ready")

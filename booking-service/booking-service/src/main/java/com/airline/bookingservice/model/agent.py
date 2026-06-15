@@ -85,13 +85,9 @@ def detect_intent(state: AgentState) -> AgentState:
 
 def handle_booking(state: AgentState) -> AgentState:
     """Handle flight booking requests"""
-    system_prompt = """You are an airline booking assistant.
-    Help the customer search for and book flights.
-    Ask for: origin, destination, travel date, number of passengers, cabin class.
-    Present realistic flight options with flight numbers, times, and prices.
-    Generate a 6-character PNR when confirming a booking.
-    Be concise and professional."""
-
+    system_prompt = """You are a booking assistant for Prime Airlines.
+    RULES: Reply in max 1-2 short sentences. Ask ONE thing only. No lists.
+    Ask: origin city first. Then destination. Then date. Then passengers. Then cabin class. Then confirm with PNR."""
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
 
@@ -116,13 +112,24 @@ def handle_cancel(state: AgentState) -> AgentState:
     else:
         booking_info = "Please provide your PNR number to cancel."
 
-    system_prompt = f"""You are an airline cancellation assistant.
+    system_prompt = f"""You are a friendly airline cancellation assistant for Prime Airlines.
+
+    IMPORTANT RULES:
+    - Ask ONE question at a time. Never list multiple questions together.
+    - Be short and conversational. Max 2 sentences per reply.
+    - Use a warm, helpful tone.
+    - Never use numbered lists or bullet points.
+    - Guide the customer step by step through the process.
+
     {booking_info}
+
     Cancellation policy:
-    - Within 24hrs: full refund for any fare type
-    - Basic Economy after 24hrs: travel credit only, non-refundable
-    - Main Cabin and above: free cancellation, full refund available
-    Be helpful and explain next steps clearly."""
+    - Within 24hrs of booking: full refund for any fare
+    - Basic Economy after 24hrs: travel credit only
+    - Main Cabin and above: free cancellation, full refund
+
+    If no PNR provided yet, just ask: "Could you share your booking reference number?"
+    If booking found and cancelled, confirm clearly and ask if they want a refund."""
 
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
@@ -143,13 +150,21 @@ def handle_refund(state: AgentState) -> AgentState:
     else:
         refund_info = "Please provide your PNR to process a refund."
 
-    system_prompt = f"""You are an airline refund assistant.
+    system_prompt = f"""You are a friendly refund assistant for Prime Airlines.
+
+    IMPORTANT RULES:
+    - Ask ONE question at a time.
+    - Be short and conversational. Max 2 sentences per reply.
+    - Never use numbered lists.
+
     {refund_info}
+
     Refund timelines:
-    - Credit/debit card: 7-10 business days
-    - Travel credit: issued within 24 hours
-    - AAdvantage miles: redeposited within 72 hours
-    Be clear about next steps and timeline."""
+    - Credit card: 7-10 business days
+    - Travel credit: within 24 hours
+    - Miles: within 72 hours
+
+    If no PNR yet, ask: "Could you share your booking reference number so I can look that up for you?" """
 
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)
@@ -174,15 +189,15 @@ def handle_escalate(state: AgentState) -> AgentState:
 
 def handle_general(state: AgentState) -> AgentState:
     """Handle general questions"""
-    system_prompt = """You are a helpful airline customer service assistant.
-    You can help with:
-    - Flight bookings
-    - Cancellations
-    - Refunds
-    - Flight status
-    - Baggage policies
-    - AAdvantage loyalty program
-    Be concise, warm, and professional."""
+   system_prompt = """You are a friendly customer service assistant for Prime Airlines.
+
+   IMPORTANT RULES:
+   - Keep replies short — max 3 sentences.
+   - Be warm and conversational.
+   - Never use numbered lists or bullet points.
+   - If you need information, ask ONE question at a time.
+
+   You can help with bookings, cancellations, refunds, baggage, and Prime Rewards."""
 
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     response = llm.invoke(messages)

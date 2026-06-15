@@ -1,11 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from agent import build_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 import uvicorn
 import uuid
 import os
@@ -13,6 +11,7 @@ import os
 load_dotenv()
 
 app = FastAPI(title="Airline Agentic AI")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -20,9 +19,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Store agent and sessions
+
 agent = build_agent()
 sessions = {}
+escalated_sessions = {}
 
 class ChatRequest(BaseModel):
     message: str
@@ -35,25 +35,49 @@ class ChatResponse(BaseModel):
     needs_escalation: bool
     pnr: str
 
+class AgentReply(BaseModel):
+    session_id: str
+    message: str
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "airline-agentic-ai"}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # Generate session ID if not provided
     session_id = request.session_id or str(uuid.uuid4())
 
-    # Load or create session history
     if session_id not in sessions:
-        sessions[session_id] = []
+        sessions[session_id] = {
+            "messages": [],
+            "intent": "",
+            "pnr": "",
+            "needs_escalation": False,
+            "taken_over": False
+        }
 
-    # Add user message
-    sessions[session_id].append(HumanMessage(content=request.message))
+    sessions[session_id]["messages"].append(
+        HumanMessage(content=request.message)
+    )
 
-    # Run the LangGraph agent
+    if sessions[session_id].get("taken_over"):
+        # Update escalated session with new customer message
+        if session_id in escalated_sessions:
+            escalated_sessions[session_id]["messages"].append({
+                "role": "user",
+                "content": request.message,
+                "intent": ""
+            })
+        return ChatResponse(
+            reply="You are now connected to a live agent. They will respond shortly.",
+            session_id=session_id,
+            intent="AGENT",
+            needs_escalation=True,
+            pnr=sessions[session_id].get("pnr", "")
+        )
+
     result = agent.invoke({
-        "messages": sessions[session_id],
+        "messages": sessions[session_id]["messages"],
         "intent": "",
         "pnr": "",
         "booking_data": {},
@@ -61,58 +85,78 @@ async def chat(request: ChatRequest):
         "session_id": session_id
     })
 
-    # Get the reply
     reply = result["messages"][-1].content
+    intent = result.get("intent", "")
+    needs_escalation = result.get("needs_escalation", False)
+    pnr = result.get("pnr", "")
 
-    # Save updated history
-    sessions[session_id] = result["messages"]
+    sessions[session_id]["messages"] = result["messages"]
+    sessions[session_id]["intent"] = intent
+    sessions[session_id]["pnr"] = pnr
+    sessions[session_id]["needs_escalation"] = needs_escalation
+
+    if needs_escalation:
+        escalated_sessions[session_id] = {
+            "session_id": session_id,
+            "intent": intent,
+            "pnr": pnr,
+            "needs_escalation": True,
+            "taken_over": False,
+            "messages": [
+                {
+                    "role": "user" if isinstance(m, HumanMessage) else "assistant",
+                    "content": m.content,
+                    "intent": intent if not isinstance(m, HumanMessage) else ""
+                }
+                for m in sessions[session_id]["messages"]
+            ]
+        }
 
     return ChatResponse(
         reply=reply,
         session_id=session_id,
-        intent=result.get("intent", ""),
-        needs_escalation=result.get("needs_escalation", False),
-        pnr=result.get("pnr", "")
+        intent=intent,
+        needs_escalation=needs_escalation,
+        pnr=pnr
     )
 
-@app.websocket("/ws/{session_id}")
-async def websocket_chat(websocket: WebSocket, session_id: str):
-    await websocket.accept()
-    
+@app.get("/agent/sessions")
+def get_escalated_sessions():
+    return list(escalated_sessions.values())
+
+@app.get("/agent/sessions/{session_id}")
+def get_session(session_id: str):
+    if session_id in escalated_sessions:
+        return escalated_sessions[session_id]
+    return {"error": "Session not found"}
+
+@app.post("/agent/takeover/{session_id}")
+async def takeover(session_id: str):
+    if session_id in sessions:
+        sessions[session_id]["taken_over"] = True
+    if session_id in escalated_sessions:
+        escalated_sessions[session_id]["taken_over"] = True
+    return {"status": "taken_over", "session_id": session_id}
+
+@app.post("/agent/reply")
+async def agent_reply(request: AgentReply):
+    session_id = request.session_id
     if session_id not in sessions:
-        sessions[session_id] = []
+        return {"error": "Session not found"}
 
-    try:
-        while True:
-            # Receive message from browser
-            message = await websocket.receive_text()
+    sessions[session_id]["taken_over"] = True
+    agent_message = AIMessage(content=f"[Agent] {request.message}")
+    sessions[session_id]["messages"].append(agent_message)
 
-            # Add to history
-            sessions[session_id].append(HumanMessage(content=message))
+    if session_id in escalated_sessions:
+        escalated_sessions[session_id]["taken_over"] = True
+        escalated_sessions[session_id]["messages"].append({
+            "role": "assistant",
+            "content": f"[Agent] {request.message}",
+            "intent": "AGENT"
+        })
 
-            # Run agent
-            result = agent.invoke({
-                "messages": sessions[session_id],
-                "intent": "",
-                "pnr": "",
-                "booking_data": {},
-                "needs_escalation": False,
-                "session_id": session_id
-            })
-
-            reply = result["messages"][-1].content
-            sessions[session_id] = result["messages"]
-
-            # Send reply back to browser
-            await websocket.send_json({
-                "reply": reply,
-                "intent": result.get("intent", ""),
-                "needs_escalation": result.get("needs_escalation", False),
-                "pnr": result.get("pnr", "")
-            })
-
-    except WebSocketDisconnect:
-        print(f"Client disconnected: {session_id}")
+    return {"status": "sent", "message": request.message}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
