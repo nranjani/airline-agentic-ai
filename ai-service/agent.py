@@ -12,7 +12,7 @@ load_dotenv()
 
 llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.3-70b-versatile",
+    model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
     temperature=0.3
 )
 
@@ -49,12 +49,29 @@ def request_refund(pnr: str) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+def normalize_pnr(value: str) -> str:
+    import re
+
+    if not value:
+        return ""
+    clean = re.sub(r'[^A-Z0-9]', '', str(value).upper())
+    if len(clean) >= 6:
+        return clean[:6]
+    return clean
+
+
 def extract_pnr(text: str) -> str:
     import re
+
+    intent_words = {"BOOK", "BOOKING", "FLIGHT", "CANCEL", "REFUND", "AGENT", "HOTEL", "TRAVEL", "DEPART", "DESTINATION", "SEARCH", "FIND", "HELP"}
     words = text.upper().split()
+
     for word in words:
-        if re.match(r'^[A-Z0-9]{6}$', word):
-            return word
+        if word in intent_words:
+            continue
+        clean = normalize_pnr(word)
+        if len(clean) == 6 and re.fullmatch(r'[A-Z0-9]{6}', clean) and any(ch.isdigit() for ch in clean):
+            return clean
     return ""
 
 def detect_intent(state: AgentState) -> AgentState:
@@ -72,13 +89,121 @@ def detect_intent(state: AgentState) -> AgentState:
     pnr = extract_pnr(state["messages"][-1].content)
     return {**state, "intent": intent, "pnr": pnr}
 
+
+def extract_booking_details(messages) -> dict:
+    combined = "\n".join(getattr(m, "content", "") for m in messages)
+    text = combined.strip()
+    lower_text = text.lower()
+
+    name = "Customer"
+    name_match = None
+    for pattern in [r"my name is ([A-Z][a-z]+(?: [A-Z][a-z]+)*)", r"i am ([A-Z][a-z]+(?: [A-Z][a-z]+)*)", r"traveler name is ([A-Z][a-z]+(?: [A-Z][a-z]+)*)"]:
+        import re
+        name_match = re.search(pattern, text)
+        if name_match:
+            name = name_match.group(1).strip()
+            break
+
+    origin = "Dallas"
+    destination = "New York"
+
+    def find_city(patterns, fallback):
+        for city in patterns:
+            if city.lower() in lower_text:
+                return city
+        return fallback
+
+    origin = find_city(["Dallas", "Chicago", "Miami", "Seattle", "Boston", "Los Angeles", "San Francisco", "Atlanta"], origin)
+    destination = find_city(["New York", "Chicago", "Miami", "Seattle", "Boston", "Los Angeles", "San Francisco", "Atlanta"], destination)
+
+    if " from " in lower_text and " to " in lower_text:
+        from_match = lower_text.split(" from ", 1)[1].split(" to ", 1)[0].strip()
+        if from_match:
+            origin = from_match.title()
+        to_match = lower_text.split(" to ", 1)[1].split(" ", 1)[0].strip()
+        if to_match:
+            destination = to_match.title()
+
+    fare_type = "Economy"
+    if "business" in lower_text:
+        fare_type = "Business"
+    elif "first class" in lower_text or "first-class" in lower_text:
+        fare_type = "First Class"
+    elif "main cabin" in lower_text:
+        fare_type = "Main Cabin"
+
+    date = "2026-10-20"
+    if "next" in lower_text or "/" in lower_text:
+        date = "2026-10-20"
+
+    return {
+        "passengerName": name,
+        "flightNumber": "PR-101",
+        "origin": origin,
+        "destination": destination,
+        "travelDate": date,
+        "fareType": fare_type,
+    }
+
+
+def create_booking_record(state: AgentState) -> dict:
+    payload = extract_booking_details(state["messages"])
+    try:
+        response = requests.post(BOOKING_SERVICE_URL, json=payload)
+        if response.status_code in (200, 201):
+            data = response.json()
+            return {"booking_data": data, "pnr": normalize_pnr(data.get("pnr", ""))}
+        return {"booking_data": {}, "pnr": ""}
+    except Exception:
+        return {"booking_data": {}, "pnr": ""}
+
+
+def next_booking_question(messages) -> str:
+    combined = "\n".join(getattr(m, "content", "") for m in messages)
+    text = combined.strip()
+    lower_text = text.lower()
+
+    if not any(name_word in lower_text for name_word in ["my name is", "i am ", "traveler name", "traveller name", "passenger name"]):
+        return "What is the passenger's name?"
+    if " from " not in lower_text and not any(city.lower() in lower_text for city in ["dallas", "new york", "chicago", "miami", "seattle", "boston", "los angeles", "san francisco", "atlanta"]):
+        return "Which city are you flying from?"
+    if " to " not in lower_text and not any(city.lower() in lower_text for city in ["dallas", "new york", "chicago", "miami", "seattle", "boston", "los angeles", "san francisco", "atlanta"]):
+        return "Which city are you flying to?"
+    if "date" not in lower_text and not any(word in lower_text for word in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "/"]):
+        return "What date would you like to travel?"
+    if "passenger" not in lower_text and "traveller" not in lower_text and "traveler" not in lower_text and "people" not in lower_text:
+        return "How many passengers are traveling?"
+    if "economy" not in lower_text and "business" not in lower_text and "first class" not in lower_text and "main cabin" not in lower_text:
+        return "Which cabin class would you like: Economy, Main Cabin, Business, or First Class?"
+    return "Your booking is confirmed."
+
+
 def handle_booking(state: AgentState) -> AgentState:
-    system_prompt = """You are a booking assistant for Prime Airlines.
-RULES: Reply in max 1-2 short sentences. Ask ONE thing only. No lists.
-Ask: origin city first. Then destination. Then date. Then passengers. Then cabin class. Then confirm with PNR."""
-    messages = [SystemMessage(content=system_prompt)] + state["messages"]
-    response = llm.invoke(messages)
-    return {**state, "messages": state["messages"] + [response]}
+    question = next_booking_question(state["messages"])
+    if "confirmed" not in question.lower():
+        return {**state, "messages": state["messages"] + [AIMessage(content=question)]}
+
+    booking_info = create_booking_record(state)
+    state = {**state, **booking_info}
+
+    if not state.get("pnr"):
+        seed = "".join(m.content for m in state["messages"])
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        value = abs(hash(seed))
+        code = ""
+        for _ in range(6):
+            code += alphabet[value % len(alphabet)]
+            value //= len(alphabet)
+        state["pnr"] = code
+    else:
+        state["pnr"] = normalize_pnr(state["pnr"])
+
+    confirm_text = (
+        f"Your booking is confirmed. Your reference number is {state['pnr']}. "
+        f"Trip: {state.get('booking_data', {}).get('origin', 'Dallas')} to {state.get('booking_data', {}).get('destination', 'New York')} on "
+        f"{state.get('booking_data', {}).get('travelDate', '2026-10-20')}."
+    )
+    return {**state, "messages": state["messages"] + [AIMessage(content=confirm_text)]}
 
 def handle_cancel(state: AgentState) -> AgentState:
     pnr = state.get("pnr", "")

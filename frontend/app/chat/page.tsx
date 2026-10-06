@@ -2,6 +2,8 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
+import { clearAuthSession, getAuthSession } from '@/lib/auth'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -14,7 +16,9 @@ interface Message {
 }
 
 export default function ChatPage() {
+  const router = useRouter()
   const [isOpen, setIsOpen] = useState(false)
+  const [isReady, setIsReady] = useState(false)
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
@@ -28,14 +32,34 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState('loading')
   const [escalated, setEscalated] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    const session = getAuthSession()
+
+    if (!session) {
+      router.replace('/login')
+      return
+    }
+
+    if (session.role !== 'customer') {
+      router.replace('/agent')
+      return
+    }
+
+    setIsReady(true)
     setSessionId(Math.random().toString(36).substring(2, 9))
-  }, [])
+  }, [router])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    if (isOpen && !loading) {
+      requestAnimationFrame(() => inputRef.current?.focus())
+    }
+  }, [isOpen, loading, messages.length])
 
   useEffect(() => {
     if (!sessionId || sessionId === 'loading') return
@@ -57,6 +81,11 @@ export default function ChatPage() {
     const interval = setInterval(poll, 3000)
     return () => clearInterval(interval)
   }, [sessionId])
+
+  const handleLogout = () => {
+    clearAuthSession()
+    router.push('/login')
+  }
 
   const sendMessage = async (text?: string) => {
     const messageText = text || input.trim()
@@ -96,6 +125,7 @@ export default function ChatPage() {
       }])
     } finally {
       setLoading(false)
+      requestAnimationFrame(() => inputRef.current?.focus())
     }
   }
 
@@ -106,6 +136,10 @@ export default function ChatPage() {
     { icon: '👤', label: 'Speak to an agent', msg: 'I need to speak to a human agent', color: 'bg-purple-50 border-purple-200 hover:bg-purple-100' },
   ]
 
+  if (!isReady) {
+    return null
+  }
+
   return (
     <div className="min-h-screen bg-white relative">
 
@@ -114,6 +148,10 @@ export default function ChatPage() {
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 bg-red-600 rounded-lg flex items-center justify-center font-bold text-xs">PR</div>
           <span className="font-semibold text-base tracking-wide">Prime Airlines</span>
+        </div>
+        <div className="flex items-center gap-4 text-sm text-blue-200">
+          <span className="text-blue-100">Customer portal</span>
+          <button onClick={handleLogout} className="rounded-full border border-blue-300 px-3 py-1.5 text-xs text-white hover:bg-blue-800">Logout</button>
         </div>
         <div className="flex gap-6 text-sm text-blue-200">
           <span className="cursor-pointer hover:text-white">Book</span>
@@ -258,6 +296,7 @@ export default function ChatPage() {
         {/* Input */}
         <div className="border-t px-4 py-3 flex items-center gap-3 bg-white flex-shrink-0">
           <input
+            ref={inputRef}
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
@@ -265,6 +304,7 @@ export default function ChatPage() {
             placeholder="Ask something..."
             className="flex-1 text-sm text-gray-700 placeholder-gray-400 focus:outline-none"
             disabled={loading}
+            autoFocus
           />
           <button onClick={() => sendMessage()} disabled={loading || !input.trim()}
             className="text-blue-900 disabled:opacity-30 transition hover:text-blue-700">

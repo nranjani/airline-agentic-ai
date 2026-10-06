@@ -1,10 +1,32 @@
+# Node / frontend
 node_modules/
+.next/
+out/
+
+# Python / AI service
 .venv/
+venv/
 __pycache__/
-*.class
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Java / backend
 target/
-.env
+*.class
 *.jar
-*.log
+
+# Local env and secrets
+.env
+.env.local
+.env.*.local
+
+# IDE / OS
 .idea/
+.vscode/
 *.iml
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
